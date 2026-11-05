@@ -1,0 +1,421 @@
+openapi: 3.1.0
+
+info:
+  title: transport-service
+  version: 1.0.0
+  summary: "Non-emergency medical transport: ride requests that take patients to and from appointments."
+  description: |
+    HTTP API for `transport-service` (domain: **transport**, port **8200**).
+
+    A ride is a pickup request for a patient who needs transport to a facility
+    (dialysis, physiotherapy, a scheduled consultation). Rides are created in
+    `requested` status and move through `assigned`, `completed` or `cancelled`.
+
+    ### Errors
+    Every error response is JSON of the form `{"error": "<message>"}`, except
+    `403` which also carries the scope gap.
+
+    ### Scopes
+    Reads require `transport.read`, `POST /api/rides` requires `transport.write`.
+
+servers:
+  - url: https://myhealthcare.dev
+    description: Production
+  - url: http://localhost:8200
+    description: Local development (host)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Rides
+    description: Create and read non-emergency transport requests.
+  - name: Health
+    description: Unauthenticated liveness probe.
+
+paths:
+  /api/rides:
+    get:
+      operationId: listRides
+      summary: List rides
+      description: |
+        Returns a page of rides plus the total count matching the filter,
+        ordered by `id` ascending. Offset-based pagination: request the next
+        page with `offset = offset + limit`.
+
+        Requires scope `transport.read`.
+      tags: [Rides]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 50, maximum 200.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 200
+            default: 50
+          example: 25
+        - name: offset
+          in: query
+          required: false
+          description: Number of rows to skip.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 0
+          example: 0
+        - name: status
+          in: query
+          required: false
+          description: Exact match on the ride status.
+          schema:
+            $ref: '#/components/schemas/RideStatus'
+          example: requested
+        - name: patient_id
+          in: query
+          required: false
+          description: Only rides requested for this patient (id from `patients-service`).
+          schema:
+            type: integer
+            format: int64
+          example: 1001
+      responses:
+        '200':
+          description: A page of rides.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RidePage'
+        '400':
+          description: '`limit` or `offset` is out of range or not an integer. Fix the input; retrying fails again.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: limit must be an integer between 1 and 200
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+    post:
+      operationId: createRide
+      summary: Request a ride
+      description: |
+        Creates a ride in `requested` status. `patient_id`, `pickup_address`,
+        `destination_facility` and `pickup_at` are required. `pickup_at` must be
+        in the future.
+
+        Requires scope `transport.write`.
+      tags: [Rides]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RideCreateRequest'
+      responses:
+        '201':
+          description: The created ride.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ride'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          description: |
+            The body is well-formed JSON but fails validation (missing required
+            field, `pickup_at` in the past, unknown `mobility_needs` value).
+            Fix the input; retrying the same request fails again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 'pickup_at must be in the future'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/rides/{ride_id}:
+    get:
+      operationId: getRide
+      summary: Get a ride
+      description: |
+        Returns one ride by id.
+
+        Requires scope `transport.read`.
+      tags: [Rides]
+      parameters:
+        - name: ride_id
+          in: path
+          required: true
+          description: Primary key of the ride.
+          schema:
+            type: integer
+            format: int64
+          example: 5001
+      responses:
+        '200':
+          description: The ride.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ride'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No ride exists with the given id. Not retryable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: ride 999999 not found
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      description: Unauthenticated. Returns `200` while the process is up.
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: The service is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT issued by `auth-service`. Scopes are read from the `scope` claim.
+
+  responses:
+    Unauthorized:
+      description: |
+        The bearer token is missing, malformed or expired. Retry only with a
+        new valid token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: missing bearer token
+
+    ServerError:
+      description: Unhandled server error (for example the database is unreachable). Retrying is safe for reads; for `POST`, check first that the ride was not created.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: internal server error
+
+    Forbidden:
+      description: The token is valid but lacks the required scope. Not retryable with the same token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ScopeError'
+          example:
+            error: insufficient scope
+            required:
+              - transport.write
+            have:
+              - transport.read
+
+  schemas:
+    RideStatus:
+      type: string
+      enum: [requested, assigned, completed, cancelled]
+      example: requested
+
+    MobilityNeed:
+      type: string
+      enum: [none, wheelchair, stretcher, assistance]
+      example: wheelchair
+
+    Ride:
+      type: object
+      required:
+        - id
+        - patient_id
+        - status
+        - pickup_address
+        - destination_facility
+        - pickup_at
+        - mobility_needs
+        - created_at
+      properties:
+        id:
+          type: integer
+          format: int64
+          readOnly: true
+        patient_id:
+          type: integer
+          format: int64
+          description: Id of the patient in `patients-service`.
+        status:
+          $ref: '#/components/schemas/RideStatus'
+        pickup_address:
+          type: string
+        destination_facility:
+          type: string
+          description: Name of the facility the patient is going to.
+        pickup_at:
+          type: string
+          format: date-time
+        mobility_needs:
+          $ref: '#/components/schemas/MobilityNeed'
+        notes:
+          type:
+            - string
+            - 'null'
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      additionalProperties: false
+      example:
+        id: 5001
+        patient_id: 1001
+        status: requested
+        pickup_address: 12 Beacon Street, Boston, MA 02108
+        destination_facility: Riverside Dialysis Center
+        pickup_at: '2026-12-02T07:30:00Z'
+        mobility_needs: wheelchair
+        notes: Ring the bell twice, ground floor.
+        created_at: '2026-11-20T09:14:22Z'
+
+    RideCreateRequest:
+      type: object
+      required:
+        - patient_id
+        - pickup_address
+        - destination_facility
+        - pickup_at
+      properties:
+        patient_id:
+          type: integer
+          format: int64
+        pickup_address:
+          type: string
+        destination_facility:
+          type: string
+        pickup_at:
+          type: string
+          format: date-time
+          description: Must be in the future.
+        mobility_needs:
+          $ref: '#/components/schemas/MobilityNeed'
+        notes:
+          type: string
+      additionalProperties: false
+      example:
+        patient_id: 1001
+        pickup_address: 12 Beacon Street, Boston, MA 02108
+        destination_facility: Riverside Dialysis Center
+        pickup_at: '2026-12-02T07:30:00Z'
+        mobility_needs: wheelchair
+        notes: Ring the bell twice, ground floor.
+
+    RidePage:
+      type: object
+      required:
+        - count
+        - items
+      properties:
+        count:
+          type: integer
+          format: int64
+          description: Total rows matching the filter, ignoring `limit` and `offset`.
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Ride'
+      additionalProperties: false
+      example:
+        count: 2
+        items:
+          - id: 5001
+            patient_id: 1001
+            status: requested
+            pickup_address: 12 Beacon Street, Boston, MA 02108
+            destination_facility: Riverside Dialysis Center
+            pickup_at: '2026-12-02T07:30:00Z'
+            mobility_needs: wheelchair
+            notes: null
+            created_at: '2026-11-20T09:14:22Z'
+          - id: 5002
+            patient_id: 1002
+            status: assigned
+            pickup_address: 48 Maple Avenue, Cambridge, MA 02139
+            destination_facility: Northside Physiotherapy Clinic
+            pickup_at: '2026-12-03T13:00:00Z'
+            mobility_needs: assistance
+            notes: null
+            created_at: '2026-11-21T14:02:10Z'
+
+    HealthStatus:
+      type: object
+      required:
+        - status
+        - service
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          example: transport-service
+      additionalProperties: false
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Human-readable failure message.
+      additionalProperties: false
+
+    ScopeError:
+      type: object
+      required:
+        - error
+        - required
+        - have
+      properties:
+        error:
+          type: string
+          const: insufficient scope
+        required:
+          type: array
+          items:
+            type: string
+        have:
+          type: array
+          items:
+            type: string
+      additionalProperties: false

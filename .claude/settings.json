@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(env -u POSTMAN_API_KEY postman init:*)",
+      "Bash(env -u POSTMAN_API_KEY postman spec generate:*)",
+      "Bash(env -u POSTMAN_API_KEY postman mock generate:*)",
+      "Bash(env -u POSTMAN_API_KEY postman mock run:*)",
+      "Bash(env -u POSTMAN_API_KEY postman collection run:*)",
+      "Bash(postman collection lint:*)",
+      "Bash(postman status:*)"
+    ]
+  }
+}
